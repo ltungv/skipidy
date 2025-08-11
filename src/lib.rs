@@ -13,16 +13,6 @@ use std::{borrow::Borrow, cmp, fmt, mem::MaybeUninit, num::NonZeroUsize, ptr::No
 
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
-/// An enumeration of all possible outcomes resulted from removing an item from the skiplist.
-enum Removal<T> {
-    // No item was removed.
-    None,
-    // A single item was removed.
-    Some(T),
-    // A single item was removed, leaving the skiplist empty.
-    Last(T),
-}
-
 /// A skiplist.
 pub struct SkipList<T, R, const N: usize>(Option<NonEmptySkipList<T, R, N>>)
 where
@@ -100,10 +90,22 @@ impl<T, R, const N: usize> SkipList<T, R, N>
 where
     R: Rng,
 {
+    /// Returns whether a value exists in the skiplist.
+    pub fn contains<U>(&self, val: &U) -> bool
+    where
+        T: Ord + Borrow<U>,
+        U: Ord,
+    {
+        let Some(skiplist) = &self.0 else {
+            return false;
+        };
+        skiplist.contains(val)
+    }
+
     /// Inserts a value into the skiplist.
     pub fn insert(&mut self, val: T)
     where
-        T: Ord + fmt::Debug,
+        T: Ord,
         R: SeedableRng,
     {
         let Some(skiplist) = &mut self.0 else {
@@ -119,29 +121,10 @@ where
         T: Ord + Borrow<U>,
         U: Ord,
     {
-        let Some(skiplist) = &mut self.0 else {
-            return None;
-        };
-        match skiplist.remove(val) {
-            Removal::None => None,
-            Removal::Some(val) => Some(val),
-            Removal::Last(val) => {
-                self.0 = None;
-                Some(val)
-            }
-        }
-    }
-
-    /// Returns whether a value exists in the skiplist.
-    pub fn contains<U>(&self, val: &U) -> bool
-    where
-        T: Ord + Borrow<U>,
-        U: Ord,
-    {
-        let Some(skiplist) = &self.0 else {
-            return false;
-        };
-        skiplist.contains(val)
+        let skiplist = self.0.take()?;
+        let (skiplist, val) = skiplist.remove(val);
+        self.0 = skiplist;
+        val
     }
 }
 
@@ -167,12 +150,38 @@ where
         }
     }
 
+    fn contains<U>(&self, val: &U) -> bool
+    where
+        T: Ord + Borrow<U>,
+        U: Ord,
+    {
+        match self.head_cmp(val) {
+            cmp::Ordering::Greater => false,
+            cmp::Ordering::Equal => true,
+            cmp::Ordering::Less => {
+                // Traverses the skiplist and searches for the value.
+                let mut prev_ptr = self.head;
+                self.descend(val, |_, ptr| prev_ptr = ptr);
+                // Checks if the value exists. The trace only includes upto the node right before
+                // the one that will potentially be matched.
+                let Some(curr_ptr) = ({
+                    let prev = unsafe { prev_ptr.as_ref() };
+                    prev.nexts[0]
+                }) else {
+                    return false;
+                };
+                let curr = unsafe { curr_ptr.as_ref() };
+                curr.val.borrow() == val
+            }
+        }
+    }
+
     fn insert(&mut self, val: T)
     where
-        T: Ord + fmt::Debug,
+        T: Ord,
     {
         if self.head_cmp(&val).is_ge() {
-            // Adds the existing head as the next node of the new head at every level.
+            // Adds the existing head's next nodes as the next nodes of the new head at every level.
             let mut new_head = SkipNode::new(val);
             new_head.nexts[0] = Some(self.head);
             let old_head = unsafe { self.head.as_mut() };
@@ -227,13 +236,13 @@ where
         }
     }
 
-    fn remove<U>(&mut self, val: &U) -> Removal<T>
+    fn remove<U>(mut self, val: &U) -> (Option<Self>, Option<T>)
     where
         T: Ord + Borrow<U>,
         U: Ord,
     {
         let val = match self.head_cmp(val) {
-            cmp::Ordering::Greater => return Removal::None,
+            cmp::Ordering::Greater => return (Some(self), None),
             cmp::Ordering::Equal => {
                 let head = unsafe { self.head.as_ref() };
                 let old_head_ptr = if let Some(new_head_ptr) = head.nexts[0] {
@@ -241,7 +250,7 @@ where
                 } else {
                     // The head gets removed and there's no next node.
                     let val = unsafe { SkipNode::dealloc(self.head) };
-                    return Removal::Last(val);
+                    return (None, Some(val));
                 };
                 // Adds the next head node to higher levels when it's not already added.
                 let new_head = unsafe { self.head.as_mut() };
@@ -266,12 +275,12 @@ where
                     let prev = unsafe { trace[0].assume_init_ref().as_ref() };
                     prev.nexts[0]
                 }) else {
-                    return Removal::None;
+                    return (Some(self), None);
                 };
                 {
                     let curr = unsafe { curr_ptr.as_ref() };
                     if curr.val.borrow() != val {
-                        return Removal::None;
+                        return (Some(self), None);
                     }
                     // Removes the node at every level.
                     for (level, mut prev_ptr) in
@@ -289,47 +298,11 @@ where
         };
         // Updates the skiplist's level by counting the number of next pointers that was removed
         // from the head.
-        let head = unsafe { self.head.as_mut() };
+        let head = unsafe { self.head.as_ref() };
         while self.levels.get() > 1 && head.nexts[self.levels.get() - 1].is_none() {
             self.levels = unsafe { NonZeroUsize::new_unchecked(self.levels.get() - 1) };
         }
-        Removal::Some(val)
-    }
-
-    fn contains<U>(&self, val: &U) -> bool
-    where
-        T: Ord + Borrow<U>,
-        U: Ord,
-    {
-        match self.head_cmp(val) {
-            cmp::Ordering::Greater => false,
-            cmp::Ordering::Equal => true,
-            cmp::Ordering::Less => {
-                // Traverses the skiplist and searches for the value.
-                let mut prev_ptr = self.head;
-                self.descend(val, |_, ptr| prev_ptr = ptr);
-                // Checks if the value exists. The trace only includes upto the node right before
-                // the one that will potentially be matched.
-                let Some(curr_ptr) = ({
-                    let prev = unsafe { prev_ptr.as_ref() };
-                    prev.nexts[0]
-                }) else {
-                    return false;
-                };
-                let curr = unsafe { curr_ptr.as_ref() };
-                curr.val.borrow() == val
-            }
-        }
-    }
-
-    fn head_cmp<U>(&self, val: &U) -> cmp::Ordering
-    where
-        T: Ord + Borrow<U>,
-        U: Ord,
-    {
-        let head = unsafe { self.head.as_ref() };
-        let head_val: &U = head.val.borrow();
-        head_val.cmp(val)
+        (Some(self), Some(val))
     }
 
     /// Traverses the skiplist, descending down all levels, and calling the given function on the
@@ -353,6 +326,16 @@ where
             }
             visit(level, prev_node_ptr);
         }
+    }
+
+    fn head_cmp<U>(&self, val: &U) -> cmp::Ordering
+    where
+        T: Ord + Borrow<U>,
+        U: Ord,
+    {
+        let head = unsafe { self.head.as_ref() };
+        let head_val: &U = head.val.borrow();
+        head_val.cmp(val)
     }
 }
 
@@ -406,6 +389,18 @@ mod tests {
     }
 
     proptest! {
+        #[cfg_attr(miri, ignore)]
+        #[test]
+        fn test_insert_contains(items in proptest::collection::vec(proptest::arbitrary::any::<usize>(), 1000)) {
+        let mut skiplist = SkipList::<usize, _, 32>::new();
+            for item in &items {
+                skiplist.insert(*item);
+            }
+            for item in items.iter().rev() {
+                assert!(skiplist.contains(item));
+            }
+        }
+
         #[test]
         fn test_insert_contains_small(items in proptest::collection::vec(proptest::arbitrary::any::<usize>(), 8)) {
         let mut skiplist = SkipList::<usize, _, 4>::new();
@@ -417,9 +412,10 @@ mod tests {
             }
         }
 
+        #[cfg_attr(miri, ignore)]
         #[test]
-        fn test_insert_remove_small(items in proptest::collection::vec(proptest::arbitrary::any::<usize>(), 8)) {
-            let mut skiplist = SkipList::<usize, _, 4>::new();
+        fn test_insert_remove(items in proptest::collection::vec(proptest::arbitrary::any::<usize>(), 1000)) {
+            let mut skiplist = SkipList::<usize, _, 32>::new();
             for item in &items {
                 skiplist.insert(*item);
             }
@@ -427,23 +423,9 @@ mod tests {
                 assert!(skiplist.remove(item).is_some_and(|v| v == *item));
             }
         }
-    }
-
-    #[cfg_attr(miri, ignore)]
-    proptest! {
-        #[test]
-        fn test_insert_contains(items in proptest::collection::vec(proptest::arbitrary::any::<usize>(), 1000)) {
-        let mut skiplist = SkipList::<usize, _, 4>::new();
-            for item in &items {
-                skiplist.insert(*item);
-            }
-            for item in items.iter().rev() {
-                assert!(skiplist.contains(item));
-            }
-        }
 
         #[test]
-        fn test_insert_remove(items in proptest::collection::vec(proptest::arbitrary::any::<usize>(), 1000)) {
+        fn test_insert_remove_small(items in proptest::collection::vec(proptest::arbitrary::any::<usize>(), 8)) {
             let mut skiplist = SkipList::<usize, _, 4>::new();
             for item in &items {
                 skiplist.insert(*item);
