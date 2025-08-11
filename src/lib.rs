@@ -84,7 +84,7 @@ where
         skiplist.insert(val);
     }
 
-    /// Removes a value from the skiplist, returning whether the value existed.
+    /// Removes a value from the skiplist, returning it if it exists.
     pub fn remove<U>(&mut self, val: &U) -> Option<T>
     where
         T: Ord + Borrow<U>,
