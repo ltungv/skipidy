@@ -1,0 +1,3 @@
+# Skipidy
+
+A skiplist implementation.
