@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use criterion::{AxisScale, BenchmarkId, Criterion, PlotConfiguration, criterion_group};
+use priority_queue::PriorityQueue;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
-use skipidy::SkipList;
+use skipidy::{SkipList, SkipMap};
 
 const SIZES: [usize; 6] = [1, 10, 100, 1000, 10_000, 100_000];
 
@@ -30,6 +31,16 @@ pub fn bench(c: &mut Criterion) {
                 sl.insert(rng.random());
             });
         });
+        group.bench_function(BenchmarkId::new("SkipMap", size), |b| {
+            let mut rng = SmallRng::seed_from_u64(0x1234_abcd);
+            let mut sm: SkipMap<u64, (), _, 32> = SkipMap::new();
+            for _ in 0..size {
+                sm.insert(rng.random(), ());
+            }
+            b.iter(|| {
+                sm.insert(rng.random(), ());
+            });
+        });
         group.bench_function(BenchmarkId::new("skiplist::OrderedSkipList", size), |b| {
             let mut rng = SmallRng::seed_from_u64(0x1234_abcd);
             let mut sl = skiplist::OrderedSkipList::<u64>::new();
@@ -48,6 +59,18 @@ pub fn bench(c: &mut Criterion) {
             }
             b.iter(|| {
                 sl.insert(rng.random(), ());
+            });
+        });
+        group.bench_function(BenchmarkId::new("PriorityQueue", size), |b| {
+            let mut rng = SmallRng::seed_from_u64(0x1234_abcd);
+            let mut pq = PriorityQueue::<u64, u64>::new();
+            for _ in 0..size {
+                let item = rng.random();
+                pq.push(item, item);
+            }
+            b.iter(|| {
+                let item = rng.random();
+                pq.push(item, item);
             });
         });
     }
